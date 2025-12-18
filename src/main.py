@@ -139,7 +139,7 @@ def main():
 
     if not SessionManager.is_authenticated():
         show_login_page()
-        show_footer()
+       # show_footer()
         return
 
     # Show user greeting at the top

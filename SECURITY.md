@@ -1,21 +1,25 @@
 # Security Policy
 
-## Supported Versions
+## Project Status
 
+Health Insights Agent (HIA) is currently maintained as a **personal and academic project**.
+There is no formal security support or guaranteed response time.
 
-The following table shows which versions of HIA are currently supported with security updates. Only the latest major release is actively maintained; older versions may not receive security patches.
+## Reporting Security Issues
 
-| Version    | Supported          |
-|------------|-------------------|
-| main (latest) | :white_check_mark: |
-| previous releases | :x:                |
+If you believe you have found a security issue, please report it responsibly by:
 
+- Opening a GitHub Issue with minimal details  
+- Avoid including sensitive data, credentials, or exploits  
 
-## Reporting a Vulnerability
+The maintainer will review the report and take appropriate action if required.
 
-To report a security vulnerability:
+## Important Notes
 
-1. Please email the project maintainer at [harshgajjar28@gmail.com](mailto:harshgajjar28@gmail.com) or open a private issue on [GitHub](https://github.com/harshhh28/hia/issues).
-2. Provide as much detail as possible, including steps to reproduce and potential impact.
-3. You can expect an initial response within 72 hours. If the vulnerability is confirmed, we will work to release a fix as soon as possible and notify you when it is available.
-4. If the vulnerability is declined, you will receive an explanation.
+- Do NOT commit API keys, secrets, or credentials
+- Environment variables should be stored in `.streamlit/secrets.toml`
+- Uploaded files are processed locally and should not contain sensitive personal data
+
+---
+
+Maintained by **Pushpa Samunuru**.

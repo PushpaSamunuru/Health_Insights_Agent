@@ -57,9 +57,7 @@ def show_sidebar():
             SessionManager.logout()
             st.rerun()
         
-        # Add footer to sidebar
-        show_footer(in_sidebar=True)
-
+      
 def show_session_list():
     if st.session_state.user and 'id' in st.session_state.user:
         success, sessions = SessionManager.get_user_sessions()

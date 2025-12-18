@@ -1,140 +1,255 @@
+import re
 import streamlit as st
 from groq import Groq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-import os
 
 
 class ChatAgent:
+    """
+    ChatAgent:
+    - Builds a vector store from extracted report text (RAG)
+    - Answers user questions in a human-friendly way
+    - Avoids repeating raw OCR/pdf text
+    """
+
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, chunk_overlap=200
+            chunk_size=900,
+            chunk_overlap=150,
+            separators=["\n\n", "\n", "  ", " ", ""],
         )
+
         self.client = Groq(api_key=st.secrets["GROQ_API_KEY"])
         self.model_name = "llama-3.3-70b-versatile"
 
-    def initialize_vector_store(self, text_content):
-        """Create vector store from text content."""
+    # -----------------------------
+    # 1) Text Cleaning
+    # -----------------------------
+    def clean_report_text(self, text: str) -> str:
+        """
+        Removes repeated headers/footers and non-medical junk commonly found in PDFs:
+        - QR code lines, passport, lab IDs, addresses, page numbers, signatures
+        """
+        if not text:
+            return ""
+
+        drop_patterns = [
+            r"scan\s*qr",
+            r"passport\s*no",
+            r"laboratory\s*test\s*report",
+            r"this\s+is\s+an\s+electronically\s+authenticated\s+report",
+            r"page\s*\d+\s*of\s*\d+",
+            r"\bref\.?\s*id\b",
+            r"\blab\s*id\b",
+            r"\bclient\s*name\b",
+            r"\bapproved\s*on\b",
+            r"\bprinted\s*on\b",
+            r"\bcollected\s*on\b",
+            r"\bprocess\s*at\b",
+            r"\blocation\b",
+            r"\baddress\b",
+            r"\bdr\.\b",
+            r"\bmd\s*path\b",
+            r"\bsignature\b",
+        ]
+
+        cleaned_lines = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            low = line.lower()
+
+            # Drop known noisy lines
+            if any(re.search(p, low) for p in drop_patterns):
+                continue
+
+            # Drop extremely long header-like lines
+            if len(line) > 180 and ("scan" in low or "mc-" in low):
+                continue
+
+            # Drop repeated separators
+            if re.fullmatch(r"[-_]{5,}", line):
+                continue
+
+            cleaned_lines.append(line)
+
+        # De-duplicate consecutive duplicate lines
+        deduped = []
+        prev = None
+        for ln in cleaned_lines:
+            if ln == prev:
+                continue
+            deduped.append(ln)
+            prev = ln
+
+        return "\n".join(deduped)
+
+    # -----------------------------
+    # 2) Vector Store Initialization
+    # -----------------------------
+    def initialize_vector_store(self, text_content: str):
+        """
+        Create a FAISS vector store from report text.
+        """
         if not text_content or text_content.strip() == "":
-            # Create a minimal vector store with a placeholder
             text_content = "No report context available."
 
-        texts = self.text_splitter.split_text(text_content)
+        # Clean before splitting/indexing
+        cleaned = self.clean_report_text(text_content)
+        if not cleaned.strip():
+            cleaned = "No report context available."
+
+        texts = self.text_splitter.split_text(cleaned)
         if not texts:
-            # If splitting results in empty list, add at least one text
-            texts = [text_content]
+            texts = [cleaned]
 
         vectorstore = FAISS.from_texts(texts, self.embeddings)
         return vectorstore
 
+    # -----------------------------
+    # 3) Chat History Formatting
+    # -----------------------------
     def _format_chat_history(self, chat_history):
-        """Format chat history for Groq API."""
+        """
+        chat_history format expected:
+        [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
+        """
         messages = []
         for msg in chat_history:
-            messages.append({"role": msg["role"], "content": msg["content"]})
+            if "role" in msg and "content" in msg:
+                messages.append({"role": msg["role"], "content": msg["content"]})
         return messages
 
-    def _contextualize_query(self, query, chat_history):
-        """Reformulate query considering chat history."""
+    # -----------------------------
+    # 4) Contextualize Query (ONLY question rewrite)
+    # -----------------------------
+    def _contextualize_query(self, query: str, chat_history):
+        """
+        Rewrites the user question into a standalone question.
+        DOES NOT analyze report. DOES NOT include report text.
+        """
         if not chat_history:
             return query
 
-        # Build context from recent chat history
-        recent_history = chat_history[-4:]  # Last 2 exchanges
+        recent_history = chat_history[-4:]  # last 2 exchanges
         history_text = "\n".join(
-            [
-                f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-                for msg in recent_history
-            ]
+            f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
+            for m in recent_history
+            if "role" in m and "content" in m
         )
 
-        contextualize_prompt = f"""Given a chat history and the latest user question, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is.
-
-Chat History:
-{history_text}
-
-Latest User Question: {query}
-
-Standalone Question:"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Rewrite the user's latest question into a standalone question. "
+                    "Do NOT answer. Keep it short and clear."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Chat History:\n{history_text}\n\n"
+                    f"Latest Question: {query}\n\n"
+                    "Standalone Question:"
+                ),
+            },
+        ]
 
         try:
-            response = self.client.chat.completions.create(
+            resp = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You reformulate questions to be standalone.",
-                    },
-                    {"role": "user", "content": contextualize_prompt},
-                ],
-                temperature=0.1,
-                max_tokens=200,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=80,
             )
-            return response.choices[0].message.content.strip()
+            return resp.choices[0].message.content.strip()
         except Exception:
-            return query  # Fallback to original query
+            return query
 
-    def get_response(self, query, vectorstore, chat_history=None):
-        """Get response using RAG."""
+    # -----------------------------
+    # 5) Main Response (Human-friendly)
+    # -----------------------------
+    def get_response(self, query: str, vectorstore, chat_history=None):
+        """
+        Uses RAG context + Groq LLM to produce a human-friendly medical explanation.
+        """
         if chat_history is None:
             chat_history = []
 
-        # 1. Contextualize query based on chat history
+        # 1) Contextualize the question
         contextualized_query = self._contextualize_query(query, chat_history)
 
-        # 2. Retrieve relevant documents
+        # 2) Retrieve relevant chunks
+        context = ""
         try:
-            retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
             docs = retriever.get_relevant_documents(contextualized_query)
-            context = "\n\n".join([doc.page_content for doc in docs])
+            context = "\n\n".join([d.page_content for d in docs if d.page_content])
 
-            # If context is just placeholder text, set to empty
+            # Clean again (safe)
+            context = self.clean_report_text(context)
+
             if context.strip() == "No report context available.":
                 context = ""
         except Exception:
-            # If retrieval fails, proceed without context
             context = ""
 
-        # 3. Build prompt with context and chat history
-        qa_system_prompt = (
-            "You are an assistant for question-answering tasks. "
-            "Use the following pieces of retrieved context to answer the question. "
-            "If you don't know the answer, just say that you don't know. "
-            "Use three sentences maximum and keep the answer concise."
-        )
+        # 3) Prompt for a friendly structured output
+        qa_system_prompt = """
+You are a medical lab report summarizer.
 
-        # Format messages for Groq API
+STRICT RULES:
+- NEVER copy/paste raw report text.
+- Ignore QR codes, passport numbers, lab IDs, page numbers, doctor names, signatures, addresses.
+- Only extract health-relevant test names + values + reference ranges + interpretation.
+- If something is missing/unclear, say "Not found in report".
+- Be calm, non-alarming, and human-friendly.
+
+OUTPUT FORMAT (ALWAYS):
+1) Overall Summary (2-4 lines)
+2) Abnormal / Borderline Results (bullets: Test — Value — Range — What it suggests)
+3) Normal Highlights (optional, max 5 bullets)
+4) Recommended Next Steps (bullets)
+5) Lifestyle & Diet Tips (bullets)
+
+If user asks a specific question, answer it within this structure.
+"""
+
         messages = [{"role": "system", "content": qa_system_prompt}]
 
-        # Add chat history
+        # Add recent chat history (optional)
         if chat_history:
-            formatted_history = self._format_chat_history(
-                chat_history[-6:]
-            )  # Last 3 exchanges
-            messages.extend(formatted_history)
+            messages.extend(self._format_chat_history(chat_history[-6:]))
 
-        # Add context and current query
-        if (
-            context
-            and context.strip()
-            and context.strip() != "No report context available."
-        ):
-            user_message = f"Context:\n{context}\n\nQuestion: {query}"
+        # Provide context + question
+        if context.strip():
+            user_message = (
+                "Here is extracted report context (may be noisy). Use it ONLY to extract facts.\n\n"
+                f"Context:\n{context}\n\n"
+                f"User Question: {query}"
+            )
         else:
-            # No report context available, rely on chat history only
-            user_message = f"Question: {query}\n\nNote: No report context is available. Please answer based on the chat history."
+            user_message = (
+                f"User Question: {query}\n\n"
+                "Note: Report context is missing or unreadable. Answer generally and ask for clearer PDF if needed."
+            )
+
         messages.append({"role": "user", "content": user_message})
 
-        # 4. Get response from Groq
+        # 4) Call Groq
         try:
-            response = self.client.chat.completions.create(
+            resp = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.7,
-                max_tokens=500,
+                temperature=0.2,
+                max_tokens=700,
             )
-            return response.choices[0].message.content
+            return resp.choices[0].message.content
         except Exception as e:
             return f"Error generating response: {str(e)}"
